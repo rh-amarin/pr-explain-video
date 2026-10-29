@@ -1,0 +1,83 @@
+{
+  "title": "Example: rate limiting for the orders API",
+  "output": "example-explainer",
+  "pr": {"repo": "acme/shop", "number": 42, "url": "https://github.com/acme/shop/pull/42"},
+  "voice": "am_michael",
+  "speed": 1.0,
+  "pronounce": {"Redis": "reddiss", "API": "A P I"},
+  "slides": [
+    {
+      "id": "intro", "type": "title",
+      "title": "Rate limiting for the orders API",
+      "subtitle": "Clients that flood the API now get a clear 429 instead of slowing everyone down",
+      "meta": ["acme/shop #42", "by jdoe", "+412", "−38", "14 files"],
+      "narration": "This pull request adds rate limiting to the orders API. A client that sends too many requests now gets a clear too many requests answer, instead of slowing the service down for everybody else."
+    },
+    {
+      "id": "what", "type": "bullets", "section": "What changes",
+      "title": "What changes for users",
+      "bullets": [
+        "Each API key gets **100 requests per minute**",
+        {"text": "Over the limit: `429 Too Many Requests`", "sub": ["`Retry-After` header says when to come back"]},
+        "Limits are shared across all API replicas"
+      ],
+      "narration": "From the outside, three things change. Every API key gets a budget of one hundred requests per minute. When a client goes over, it receives a four twenty nine with a retry after header. And the budget is shared across all replicas, so adding replicas does not multiply the limit."
+    },
+    {
+      "id": "components", "type": "components", "section": "Components",
+      "title": "Where the change lands",
+      "components": [
+        {"name": "API gateway", "role": "Terminates TLS, routes requests", "status": "unchanged"},
+        {"name": "Orders API", "role": "REST service for orders", "status": "changed", "change": "New rate limit middleware in the request chain"},
+        {"name": "Redis", "role": "Shared counters", "status": "new", "change": "Holds one counter per API key and window"},
+        {"name": "PostgreSQL", "role": "Order storage", "status": "unchanged"}
+      ],
+      "narration": "The system has four components. The gateway and the database are untouched. The orders API gets a new middleware, and a new component appears: a reddiss instance that holds the counters."
+    },
+    {
+      "id": "arch", "type": "diagram", "section": "Architecture",
+      "title": "A new dependency: shared counters",
+      "before": {
+        "layers": [["client"], ["api"], ["pg"]],
+        "nodes": {"client": {"label": "Client", "shape": "actor"}, "api": {"label": "Orders API"}, "pg": {"label": "PostgreSQL", "shape": "db"}},
+        "edges": [{"from": "client", "to": "api", "label": "HTTPS"}, {"from": "api", "to": "pg"}]
+      },
+      "after": {
+        "layers": [["client"], ["api"], ["pg", "redis"]],
+        "nodes": {"client": {"label": "Client", "shape": "actor"}, "api": {"label": "Orders API", "sub": "+ rate limit middleware", "status": "changed"},
+                  "pg": {"label": "PostgreSQL", "shape": "db"}, "redis": {"label": "Redis", "sub": "counters", "shape": "db", "status": "new"}},
+        "edges": [{"from": "client", "to": "api", "label": "HTTPS"}, {"from": "api", "to": "pg"}, {"from": "api", "to": "redis", "label": "INCR + EXPIRE", "status": "new"}],
+        "groups": [{"label": "cluster", "nodes": ["api", "pg", "redis"]}]
+      },
+      "caption": "Every request now makes one extra round trip to Redis before reaching the handler",
+      "narration": "Architecturally, this is the one thing to remember. The orders API gains a dependency on reddiss. Every request makes one extra round trip to increment a counter before the handler runs."
+    },
+    {
+      "id": "code", "type": "code", "section": "Key changes",
+      "title": "The middleware fails open",
+      "file": "internal/middleware/ratelimit.go", "language": "go",
+      "code": "func (l *Limiter) Allow(ctx context.Context, key string) (bool, error) {\n\tn, err := l.redis.Incr(ctx, windowKey(key)).Result()\n\tif err != nil {\n\t\t// Redis down: let traffic through rather than fail every request.\n\t\tl.metrics.FailOpen.Inc()\n\t\treturn true, nil\n\t}\n\treturn n <= l.limit, nil\n}",
+      "highlight": [3, 4, 5, 6],
+      "note": "**Why it matters:** an outage of the new dependency degrades protection, not availability.",
+      "narration": "The most important design decision is in the middleware. If reddiss is unreachable, the limiter lets traffic through and counts the event in a metric. So losing the new dependency costs you protection, but never availability."
+    },
+    {
+      "id": "demo-intro", "type": "section", "number": "Demo", "title": "Trying it on a live environment",
+      "narration": "Let's try it on a running environment."
+    },
+    {
+      "id": "demo-1", "type": "terminal", "section": "Live demo", "step": "Step 1",
+      "title": "Send 105 requests with one key",
+      "command": "for i in $(seq 105); do curl -s -o /dev/null -w '%{http_code}\\n' $API/orders; done | sort | uniq -c",
+      "output": " 100 200\n   5 429",
+      "highlight": ["429"],
+      "narration": "First, I send one hundred and five requests with the same key. One hundred succeed, and the last five are rejected."
+    },
+    {
+      "id": "recap", "type": "bullets", "section": "Recap",
+      "title": "What to remember",
+      "bullets": ["Per-key limit, shared across replicas", "New Redis dependency, fails open", "Try it: 105 requests, 5 rejections"],
+      "narration": "To recap. A per key limit shared across replicas, one new dependency that fails open, and a thirty second way to see it working. Thanks for watching."
+    }
+  ]
+}
